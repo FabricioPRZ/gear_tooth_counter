@@ -54,6 +54,11 @@ class ToothCounterConfig:
     peak_prominence: float = 6.0   # qué tan "sobresaliente" debe ser un diente
     peak_min_distance: int = 15    # separación mínima entre dientes (en puntos de muestreo)
 
+    # --- Calibración de medida (píxeles -> milímetros) ---
+    # None = sin calibrar todavía; se llena con el botón "Calibrar" de la GUI
+    # (ver infrastructure/calibration_repository.py) y se persiste entre corridas.
+    pixels_per_mm: Optional[float] = None
+
 
 @dataclass
 class ToothDetectionResult:

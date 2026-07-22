@@ -6,20 +6,20 @@ Ejecutar con:
 
 Requisitos (ver requirements.txt):
     pip install -r requirements.txt
+
+La interfaz es una GUI de Tkinter (presentation/tkinter_app.py): permite
+ingresar la IP de una cámara ESP32-CAM, conectarse y ver el conteo de
+dientes en vivo. Para la versión anterior con ventanas de OpenCV y
+trackbars de calibración, ver presentation/display_window.py.
 """
 from domain.models import ToothCounterConfig
-from infrastructure.camera_source import CameraSource
-from presentation.display_window import DisplayApp
+from presentation.tkinter_app import TkinterApp
 
 
 def main() -> None:
-    # Índice 0 = primera cámara disponible del sistema (webcam por defecto).
-    # Si tienes varias cámaras y no abre la correcta, prueba 1, 2, etc.
-    camera = CameraSource(index=0, width=1280, height=720)
+    config = ToothCounterConfig()  # valores por defecto del algoritmo de conteo
 
-    config = ToothCounterConfig()  # valores por defecto, ajustables con trackbars
-
-    app = DisplayApp(camera=camera, config=config)
+    app = TkinterApp(config=config)
     app.run()
 
 

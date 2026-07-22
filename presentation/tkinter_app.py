@@ -178,9 +178,9 @@ class TkinterApp:
         address_entry.pack(side="left", padx=(8, 8))
         address_entry.bind("<Return>", lambda _e: self._on_connect_clicked())
         self._connect_btn = tk.Button(conn, text="Desconectar", command=self._on_connect_clicked,
-                                       bg=ACCENT_BLUE, fg="white", relief="flat",
-                                       activebackground=ACCENT_BLUE_HOVER, activeforeground="white",
-                                       padx=12, pady=2, cursor="hand2", bd=0)
+                                    bg=ACCENT_BLUE, fg="white", relief="flat",
+                                    activebackground=ACCENT_BLUE_HOVER, activeforeground="white",
+                                    padx=12, pady=2, cursor="hand2", bd=0)
         self._connect_btn.pack(side="left")
 
         usb_row = ttk.Frame(panel, style="TFrame")
@@ -189,12 +189,22 @@ class TkinterApp:
         self._usb_index_var = tk.StringVar(value="0")
         ttk.Entry(usb_row, textvariable=self._usb_index_var, width=4).pack(side="left", padx=(8, 0))
         ttk.Label(usb_row, text="(revisa con 'ls /dev/video*' cuál te asignó DroidCam/Iriun)",
-                  style="PanelSub.TLabel").pack(side="left", padx=(8, 0))
+                style="PanelSub.TLabel").pack(side="left", padx=(8, 0))
 
         self._refresh_source_buttons()
 
+        # --- IMPORTANTE: el control de luz se empaca ANTES que el video,
+        # anclado a "bottom", para que siempre reserve su espacio sin
+        # importar qué tan grande sea la imagen de la cámara.
+        self._build_light_control(panel)
+
         video_wrap = tk.Frame(panel, bg="black")
         video_wrap.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        # Evita que el tamaño de la imagen de la cámara "empuje" el layout:
+        # el frame conserva el tamaño que le da el gestor pack (fill/expand),
+        # sin crecer para acomodar al Label hijo.
+        video_wrap.pack_propagate(False)
+
         self._video_label = tk.Label(
             video_wrap, bg="black",
             text=f"Conectando con {DEFAULT_STREAM_URL}...",
@@ -202,11 +212,9 @@ class TkinterApp:
         )
         self._video_label.pack(fill="both", expand=True)
 
-        self._build_light_control(panel)
-
     def _build_light_control(self, parent: tk.Frame) -> None:
         light_box = tk.Frame(parent, bg=BG_PANEL)
-        light_box.pack(fill="x", padx=14, pady=(0, 12))
+        light_box.pack(side="bottom", fill="x", padx=14, pady=(0, 12))
 
         addr_row = ttk.Frame(light_box, style="TFrame")
         addr_row.pack(fill="x", pady=(0, 4))

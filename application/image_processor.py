@@ -63,7 +63,26 @@ def to_binary_mask(frame_bgr: np.ndarray, cfg: ToothCounterConfig) -> np.ndarray
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
-    return binary
+    return _fill_holes(binary)
+
+
+def _fill_holes(binary: np.ndarray) -> np.ndarray:
+    """Rellena huecos internos de la máscara (barreno central, tornillos,
+    números grabados, brillos) que no tocan el borde de la imagen.
+
+    Sin esto, esos huecos podían quedar como "islas" negras dentro del
+    engrane; no afectan el conteo de dientes (que solo mira el contorno
+    EXTERNO), pero si el hueco llega a tocar el borde de la pieza puede
+    fragmentar la máscara en varios contornos chicos que ninguno pasa el
+    filtro de forma ni el área mínima, aunque a simple vista la máscara se
+    vea bien.
+    """
+    h, w = binary.shape
+    flood = binary.copy()
+    flood_mask = np.zeros((h + 2, w + 2), np.uint8)
+    cv2.floodFill(flood, flood_mask, (0, 0), 255)
+    holes = cv2.bitwise_not(flood)
+    return cv2.bitwise_or(binary, holes)
 
 
 def compute_shape_descriptors(contour: np.ndarray) -> dict:

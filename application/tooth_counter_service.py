@@ -57,8 +57,15 @@ class ToothCounterService:
         angles, radii = self._radial_profile(contour, centroid, cfg.resample_points)
         radii_smooth = self._smooth_circular(radii, cfg.smoothing_window)
 
+        # cfg.peak_prominence es una fracción del radio promedio (ver
+        # domain/models.py): así el umbral de "qué tan saliente debe ser un
+        # diente" se adapta solo al tamaño real del engrane en la imagen, en
+        # vez de exigir el mismo valor en píxeles sin importar el zoom.
+        mean_radius = float(np.mean(radii_smooth)) if len(radii_smooth) else 0.0
+        prominence_px = max(1.0, cfg.peak_prominence * mean_radius)
+
         peak_indices = self._find_circular_peaks(
-            radii_smooth, cfg.peak_min_distance, cfg.peak_prominence
+            radii_smooth, cfg.peak_min_distance, prominence_px
         )
 
         peak_points = self._angles_to_points(

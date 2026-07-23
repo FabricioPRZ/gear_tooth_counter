@@ -19,6 +19,7 @@ import time
 import cv2
 import numpy as np
 
+from infrastructure.light_controller import LightController
 from domain.models import ToothCounterConfig, ToothDetectionResult
 from application.tooth_counter_service import ToothCounterService
 from infrastructure.camera_source import CameraSource
@@ -42,6 +43,7 @@ TB_SOLID = "9 Solidez min x100"
 TB_SMOOTH = "10 Suavizado perfil"
 TB_PROM = "11 Prominencia pico"
 TB_DIST = "12 Distancia entre dientes"
+TB_BRIGHTNESS = "0 Brillo ESP32"
 
 _HELP_TEXT = [
     ("PREPROCESAMIENTO (limpian la imagen antes de buscar el engrane)", None),
@@ -85,10 +87,11 @@ _HELP_TEXT = [
 
 
 class DisplayApp:
-    def __init__(self, camera: CameraSource, config: ToothCounterConfig):
+    def __init__(self, camera: CameraSource, config: ToothCounterConfig, light_host: str = "camara.local"):
         self.camera = camera
         self.config = config
         self.service = ToothCounterService(config)
+        self.light = LightController(host=light_host)
         self._help_panel_static = None  # se construye una sola vez (es texto fijo)
 
     # ------------------------------------------------------------------
@@ -99,6 +102,7 @@ class DisplayApp:
         cv2.resizeWindow(WINDOW_CONTROLS, 480, 460)
         cfg = self.config
 
+        cv2.createTrackbar(TB_BRIGHTNESS, WINDOW_CONTROLS, 255, 255, lambda v: None)
         cv2.createTrackbar(TB_BLUR, WINDOW_CONTROLS, cfg.blur_kernel, 31, lambda v: None)
         cv2.createTrackbar(TB_OTSU, WINDOW_CONTROLS, int(cfg.use_otsu), 1, lambda v: None)
         cv2.createTrackbar(TB_THRESH, WINDOW_CONTROLS, cfg.manual_threshold, 255, lambda v: None)
@@ -116,6 +120,8 @@ class DisplayApp:
         cv2.resizeWindow(WINDOW_HELP, 620, 760)
 
     def _read_trackbars_into_config(self) -> None:
+        esp_brightness = cv2.getTrackbarPos(TB_BRIGHTNESS, WINDOW_CONTROLS)
+        self.light.set_brightness(esp_brightness)
         cfg = self.config
         cfg.blur_kernel = max(1, cv2.getTrackbarPos(TB_BLUR, WINDOW_CONTROLS))
         cfg.use_otsu = bool(cv2.getTrackbarPos(TB_OTSU, WINDOW_CONTROLS))
@@ -264,5 +270,6 @@ class DisplayApp:
                     cv2.imwrite(filename, output)
                     print(f"Captura guardada: {filename}")
         finally:
+            self.light.stop()
             self.camera.release()
             cv2.destroyAllWindows()

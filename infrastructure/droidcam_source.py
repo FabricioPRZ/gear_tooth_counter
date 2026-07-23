@@ -1,11 +1,12 @@
 """
 Capa de INFRAESTRUCTURA.
 
-Cliente de una cámara local expuesta como dispositivo de video estándar de
-Linux (/dev/videoN) — típicamente el celular conectado por cable USB
-corriendo una app como DroidCam o Iriun Webcam, que lo presenta como una
-webcam más. Se usa como respaldo cuando la ESP32-CAM no da buena imagen o
-no conecta.
+Cliente del stream de video que expone DroidCam (o Iriun Webcam) por WiFi.
+No requiere cable USB ni el cliente de escritorio de DroidCam instalado en
+la PC: basta con que el celular esté en la misma red y se indiquen su IP y
+puerto (la app DroidCam los muestra en pantalla al elegir conexión WiFi; el
+puerto por defecto es 4747). Con eso se arma la URL 'http://<ip>:<puerto>/
+video', que es el feed MJPEG que la propia app expone.
 
 Misma interfaz no bloqueante que IPCameraSource (open/read/is_connected/
 last_error/release), para que la GUI pueda tratar ambas fuentes de cámara
@@ -18,15 +19,20 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
+DEFAULT_PORT = 4747
+OPEN_TIMEOUT_MS = 4000
+READ_TIMEOUT_MS = 4000
 RECONNECT_DELAY_S = 3.0
 
 
-class USBCameraSource:
-    """Cámara local (webcam integrada o celular vía DroidCam/Iriun Webcam
-    por USB) identificada por su índice de dispositivo (0, 1, 2...)."""
+class DroidCamSource:
+    """Cámara del celular vía DroidCam/Iriun Webcam por WiFi, identificada
+    por su IP y puerto (sin cable, sin cliente de escritorio)."""
 
-    def __init__(self, device_index: int = 0):
-        self._device_index = device_index
+    def __init__(self, ip: str, port: int = DEFAULT_PORT):
+        self._ip = (ip or "").strip()
+        self._port = port
+        self._url = self.build_url(self._ip, self._port)
         self._cap: Optional[cv2.VideoCapture] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -63,7 +69,7 @@ class USBCameraSource:
                 with self._lock:
                     self._connected = False
                     self._last_error = (
-                        f"Se perdió la señal de la cámara USB (índice {self._device_index})."
+                        f"Se perdió la señal de DroidCam en '{self._url}'."
                     )
                 cap.release()
                 if self._cap is cap:
@@ -71,7 +77,17 @@ class USBCameraSource:
                 time.sleep(RECONNECT_DELAY_S)
 
     def _try_connect(self) -> None:
-        cap = cv2.VideoCapture(self._device_index)
+        if not self._ip:
+            with self._lock:
+                self._last_error = "Ingresa la IP del celular para conectar por WiFi."
+            return
+        # CAP_PROP_OPEN_TIMEOUT_MSEC / READ_TIMEOUT_MSEC evitan que
+        # VideoCapture se quede esperando indefinidamente a un celular
+        # apagado o inalcanzable.
+        cap = cv2.VideoCapture(self._url, cv2.CAP_FFMPEG, [
+            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, OPEN_TIMEOUT_MS,
+            cv2.CAP_PROP_READ_TIMEOUT_MSEC, READ_TIMEOUT_MS,
+        ])
         if cap.isOpened():
             self._cap = cap
             with self._lock:
@@ -80,8 +96,9 @@ class USBCameraSource:
             cap.release()
             with self._lock:
                 self._last_error = (
-                    f"No se encontró cámara USB en el índice {self._device_index}. "
-                    "Reintentando automáticamente..."
+                    f"No se pudo conectar a DroidCam en '{self._url}'. "
+                    "Verifica que el celular esté en la misma red WiFi y que "
+                    "la app DroidCam esté abierta. Reintentando automáticamente..."
                 )
 
     def read(self) -> Tuple[bool, Optional[np.ndarray]]:
@@ -108,9 +125,16 @@ class USBCameraSource:
             self._cap = None
         self._connected = False
 
-    def __enter__(self) -> "USBCameraSource":
+    def __enter__(self) -> "DroidCamSource":
         self.open()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
+
+    @staticmethod
+    def build_url(ip: str, port: int = DEFAULT_PORT) -> str:
+        """Arma la URL del feed de DroidCam a partir de la IP y el puerto
+        que muestra la app en el celular al conectarse por WiFi."""
+        host = (ip or "").strip()
+        return f"http://{host}:{port}/video"

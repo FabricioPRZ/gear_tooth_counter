@@ -31,15 +31,30 @@ class ToothCounterConfig:
 
     # --- Filtro de FORMA: descarta objetos que no parecen engranaje ---
     # (personas, manos, cajas, etc. tienen circularidad/solidez muy distintas
-    # a un engrane, que es básicamente un disco con muescas poco profundas)
+    # a un engrane, que es básicamente un disco con muescas poco profundas).
+    # Los rangos son deliberadamente laxos: un engrane con dientes grandes/
+    # profundos o visto con un poco de perspectiva puede bajar bastante estos
+    # valores, y antes de esto se estaba rechazando como "no parece engrane"
+    # aunque la máscara B/N mostrara la silueta correcta.
     use_shape_filter: bool = True
-    min_circularity: float = 0.30  # 4*pi*Area/Perimetro^2 -> 1.0 = círculo perfecto
-    max_circularity: float = 0.95  # dientes profundos bajan mucho este valor, por
+    min_circularity: float = 0.03  # 4*pi*Area/Perimetro^2 -> 1.0 = círculo perfecto.
+                                    # OJO: cv2.arcLength sobreestima MUCHO el perímetro en
+                                    # contornos rasterizados (efecto "escalera" de píxeles),
+                                    # y esto se agrava con muchos dientes o dientes profundos
+                                    # (medido hasta ~0.036 en engranes sintéticos legítimos de
+                                    # 36 dientes). Por eso este mínimo se deja casi como
+                                    # pass-through: el filtro real contra personas/manos/cajas
+                                    # lo hacen solidez y aspect ratio, que sí son estables.
+    max_circularity: float = 0.98  # dientes profundos bajan mucho este valor, por
                                     # eso el minimo es laxo; el filtro fuerte es el aspect ratio
-    min_solidity: float = 0.78     # Area / Area del casco convexo
-    max_solidity: float = 0.98
-    min_aspect_ratio: float = 0.82  # ancho/alto del bounding box (~1 = redondo).
-    max_aspect_ratio: float = 1.22  # Este es el filtro MAS fuerte contra personas/manos,
+    min_solidity: float = 0.55     # Area / Area del casco convexo (dientes muy profundos y/o
+                                    # numerosos restan bastante área frente al casco convexo;
+                                    # 0.55 cubre engranes de dientes profundos sin abrir la
+                                    # puerta a siluetas de manos/personas, que siguen quedando
+                                    # fuera por el aspect ratio)
+    max_solidity: float = 0.99
+    min_aspect_ratio: float = 0.72  # ancho/alto del bounding box (~1 = redondo).
+    max_aspect_ratio: float = 1.35  # Este es el filtro MAS fuerte contra personas/manos,
                                      # que suelen ser mucho mas altas que anchas (o viceversa).
 
     # --- Validación de rango de dientes esperado (avisa si algo "raro" se detecta) ---
@@ -51,7 +66,13 @@ class ToothCounterConfig:
     smoothing_window: int = 9      # ventana de suavizado circular del perfil
 
     # --- Detección de picos (dientes) ---
-    peak_prominence: float = 6.0   # qué tan "sobresaliente" debe ser un diente
+    # peak_prominence es una FRACCIÓN del radio promedio del engrane detectado
+    # (no píxeles absolutos): así "qué tan sobresaliente debe ser un diente"
+    # se adapta solo al tamaño/zoom de la pieza en la imagen. Con un valor fijo
+    # en píxeles, el mismo umbral era demasiado alto para un engrane chico o
+    # lejos de la cámara (no detectaba ningún diente) y demasiado bajo para uno
+    # grande/cerca (detectaba ruido como dientes).
+    peak_prominence: float = 0.02
     peak_min_distance: int = 15    # separación mínima entre dientes (en puntos de muestreo)
 
     # --- Calibración de medida (píxeles -> milímetros) ---

@@ -27,10 +27,10 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 
-const char* WIFI_SSID = "TU_RED_WIFI";
-const char* WIFI_PASSWORD = "TU_CONTRASENA";
+const char* WIFI_SSID = "S25U";
+const char* WIFI_PASSWORD = "123456790";
 
-const byte PWM_PIN = 9;   // <-- confirma que coincide con tu cableado real
+const byte PWM_PIN = 13;   // <-- confirma que coincide con tu cableado real
 
 int brillo = 255;  // Valor inicial (0-255)
 

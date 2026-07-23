@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\('presentation/tkinter_app.py', encoding='utf-8'\\).read\\(\\)\\); ast.parse\\(open\\('infrastructure/droidcam_source.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(./venv/Scripts/python.exe -c ' *)",
+      "Bash(./venv/Scripts/python.exe main.py)",
+      "Bash(echo \"launched pid $!\")",
+      "Bash(cat /tmp/app_stdout.log)",
+      "Bash(./venv/Scripts/python.exe --version)",
+      "Bash(tasklist //FI \"IMAGENAME eq python.exe\" //FO LIST)",
+      "Bash(kill 298)",
+      "Bash(tasklist //FI \"IMAGENAME eq python.exe\")",
+      "Bash(timeout 20 ./venv/Scripts/python.exe _ui_size_check.py)",
+      "Bash(./venv/Scripts/python.exe _gear_check.py)",
+      "Bash(./venv/Scripts/python.exe _gear_debug.py)",
+      "Bash(./venv/Scripts/python.exe _gear_debug2.py)",
+      "Bash(python _gear_check.py)",
+      "Bash(venv/Scripts/python.exe _gear_check.py)",
+      "Bash(venv/Scripts/python.exe _gear_debug2.py)"
+    ]
+  }
+}

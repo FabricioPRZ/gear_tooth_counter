@@ -36,7 +36,7 @@ from infrastructure.calibration_repository import CalibrationRepository
 from infrastructure.ip_camera_source import DEFAULT_STREAM_URL, IPCameraSource
 from infrastructure.light_controller import DEFAULT_LIGHT_HOST, LightController
 from infrastructure.record_repository import InspectionRecord, RecordRepository
-from infrastructure.usb_camera_source import USBCameraSource
+from infrastructure.droidcam_source import DEFAULT_PORT, DroidCamSource
 
 BG_APP = "#0d1117"
 BG_PANEL = "#161b22"
@@ -50,7 +50,8 @@ ACCENT_GREEN = "#3fb950"
 ACCENT_RED = "#f85149"
 
 # Si la ESP32-CAM no entrega ni un frame en este tiempo desde que se intenta
-# conectar, se cambia solo a la cámara USB (celular) como respaldo.
+# conectar, se cambia sola a la cámara del celular por WiFi (DroidCam) como
+# respaldo.
 CAMERA_FALLBACK_TIMEOUT_S = 8.0
 
 
@@ -62,9 +63,9 @@ class TkinterApp:
         self.calibration = CalibrationRepository()
         self.config.pixels_per_mm = self.calibration.load_pixels_per_mm()
 
-        self.camera = None  # IPCameraSource o USBCameraSource, misma interfaz
+        self.camera = None  # IPCameraSource o DroidCamSource, misma interfaz
         self.light = LightController(DEFAULT_LIGHT_HOST)
-        self._camera_source_kind = "esp32"  # "esp32" o "usb"
+        self._camera_source_kind = "esp32"  # "esp32" o "usb" (celular por WiFi)
         self._camera_connect_started_at: Optional[float] = None
         self._auto_fallback_done = False
         self._last_result: Optional[ToothDetectionResult] = None
@@ -166,7 +167,7 @@ class TkinterApp:
             relief="flat", padx=10, pady=3, cursor="hand2", bd=0)
         self._source_esp32_btn.pack(side="left", padx=(8, 4))
         self._source_usb_btn = tk.Button(
-            source_row, text="Cámara USB (celular)", command=lambda: self._select_camera_source("usb"),
+            source_row, text="Celular (WiFi)", command=lambda: self._select_camera_source("usb"),
             relief="flat", padx=10, pady=3, cursor="hand2", bd=0)
         self._source_usb_btn.pack(side="left")
 
@@ -185,10 +186,13 @@ class TkinterApp:
 
         usb_row = ttk.Frame(panel, style="TFrame")
         usb_row.pack(fill="x", padx=14, pady=(0, 8))
-        ttk.Label(usb_row, text="Índice cámara USB:", style="PanelSub.TLabel").pack(side="left")
-        self._usb_index_var = tk.StringVar(value="0")
-        ttk.Entry(usb_row, textvariable=self._usb_index_var, width=4).pack(side="left", padx=(8, 0))
-        ttk.Label(usb_row, text="(revisa con 'ls /dev/video*' cuál te asignó DroidCam/Iriun)",
+        ttk.Label(usb_row, text="IP celular:", style="PanelSub.TLabel").pack(side="left")
+        self._usb_ip_var = tk.StringVar(value="")
+        ttk.Entry(usb_row, textvariable=self._usb_ip_var, width=15).pack(side="left", padx=(8, 12))
+        ttk.Label(usb_row, text="Puerto:", style="PanelSub.TLabel").pack(side="left")
+        self._usb_port_var = tk.StringVar(value=str(DEFAULT_PORT))
+        ttk.Entry(usb_row, textvariable=self._usb_port_var, width=6).pack(side="left", padx=(8, 0))
+        ttk.Label(usb_row, text="(abre DroidCam en el celular, elige conexión WiFi y copia esa IP/puerto)",
                 style="PanelSub.TLabel").pack(side="left", padx=(8, 0))
 
         self._refresh_source_buttons()
@@ -255,10 +259,14 @@ class TkinterApp:
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
 
-        self._count_var = self._build_stat_box(grid, "NÚMERO DE DIENTES", "0", row=0, col=0, unit="DIENTES")
-        self._gear_type_var = self._build_stat_box(grid, "TIPO DE ENGRANE", "--", row=0, col=1)
-        self._diameter_var = self._build_stat_box(grid, "DIÁMETRO", "--", row=1, col=0, unit="mm")
-        self._corrosion_var = self._build_stat_box(grid, "CORROSIÓN", "N/D", row=1, col=1)
+        self._count_var = self._build_stat_box(
+            grid, "NÚMERO DE DIENTES", "0", row=0, col=0, unit="DIENTES", width=6)
+        self._gear_type_var = self._build_stat_box(
+            grid, "TIPO DE ENGRANE", "--", row=0, col=1, width=18)
+        self._diameter_var = self._build_stat_box(
+            grid, "DIÁMETRO", "--", row=1, col=0, unit="mm", width=12)
+        self._corrosion_var = self._build_stat_box(
+            grid, "CORROSIÓN", "N/D", row=1, col=1, width=6)
 
         self._build_calibration_row(panel)
 
@@ -376,7 +384,7 @@ class TkinterApp:
 
     @staticmethod
     def _build_stat_box(grid: ttk.Frame, label: str, initial: str, row: int, col: int,
-                         unit: str = "") -> tk.StringVar:
+                         unit: str = "", width: int = 10) -> tk.StringVar:
         wrap = ttk.Frame(grid, style="TFrame")
         wrap.grid(row=row * 2, column=col, sticky="ew", padx=(0 if col == 0 else 6, 6 if col == 0 else 0))
         ttk.Label(wrap, text=label, style="FieldLabel.TLabel").pack(anchor="w")
@@ -386,8 +394,11 @@ class TkinterApp:
                  padx=(0 if col == 0 else 6, 6 if col == 0 else 0), pady=(4, 10))
 
         var = tk.StringVar(value=initial)
+        # width fijo (en caracteres): así el valor puede cambiar de "--" a un
+        # texto largo (p.ej. "Engrane industrial") sin que la caja crezca o
+        # encoja y "tiemble" el resto de la interfaz.
         tk.Label(box, textvariable=var, bg=BG_INPUT, fg=TEXT_PRIMARY,
-                 font=("TkDefaultFont", 14, "bold"), anchor="w").pack(
+                 font=("TkDefaultFont", 14, "bold"), anchor="w", width=width).pack(
             side="left", padx=10, pady=6, fill="x", expand=True)
         if unit:
             tk.Label(box, text=unit, bg=BG_INPUT, fg=TEXT_SECONDARY,
@@ -428,9 +439,10 @@ class TkinterApp:
     # que conecta y, si la señal se cae, reintenta solo cada pocos
     # segundos. Hay dos fuentes intercambiables (misma interfaz
     # open/read/is_connected/last_error/release): la ESP32-CAM por WiFi
-    # y una cámara USB local (típicamente el celular con DroidCam/Iriun
-    # Webcam) — si la ESP32-CAM no da imagen a tiempo, se cambia sola a
-    # la USB (ver _tick). También se puede forzar con los botones "Fuente".
+    # y el celular corriendo DroidCam también por WiFi (sin cable, sin
+    # cliente de escritorio: solo IP y puerto) — si la ESP32-CAM no da
+    # imagen a tiempo, se cambia sola al celular (ver _tick). También se
+    # puede forzar con los botones "Fuente".
     # ------------------------------------------------------------------
     def _auto_connect(self) -> None:
         self._camera_source_kind = "esp32"
@@ -446,11 +458,12 @@ class TkinterApp:
         self._connect_btn.config(text="Desconectar")
 
     def _connect_usb(self) -> None:
+        ip = self._usb_ip_var.get().strip()
         try:
-            index = int(self._usb_index_var.get().strip())
+            port = int(self._usb_port_var.get().strip())
         except ValueError:
-            index = 0
-        camera = USBCameraSource(index)
+            port = DEFAULT_PORT
+        camera = DroidCamSource(ip, port)
         camera.open()
         self.camera = camera
         self._connect_btn.config(text="Desconectar")
@@ -645,7 +658,7 @@ class TkinterApp:
                     self._auto_fallback_done = True
                     self._feedback_var.set(
                         "No se detectó la ESP32-CAM a tiempo; cambiando automáticamente "
-                        "a la cámara USB del celular."
+                        "a la cámara del celular por WiFi."
                     )
                     self._select_camera_source("usb")
 

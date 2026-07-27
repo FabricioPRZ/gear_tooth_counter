@@ -80,6 +80,18 @@ class ToothCounterConfig:
     # (ver infrastructure/calibration_repository.py) y se persiste entre corridas.
     pixels_per_mm: Optional[float] = None
 
+    # --- Detección automática de defectos (ver application/gear_analysis.py) ---
+    # Corrosión: qué porcentaje del área del engrane debe verse con color de
+    # óxido para marcarlo como corroído.
+    rust_ratio_threshold: float = 0.08
+    # Diente roto/faltante: comparamos el hueco angular MÁS GRANDE entre dos
+    # picos (dientes) consecutivos contra el hueco esperado si los dientes
+    # estuvieran parejos (360° / n_dientes). Si un diente se rompió o falta,
+    # ese hueco es notoriamente más grande que el resto -> se marca como
+    # sospechoso de diente roto/faltante. 1.8 es deliberadamente laxo (un
+    # engrane sano real casi nunca supera ~1.3x por ruido de la imagen).
+    tooth_gap_ratio_threshold: float = 1.8
+
 
 @dataclass
 class ToothDetectionResult:

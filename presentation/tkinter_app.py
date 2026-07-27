@@ -24,6 +24,8 @@ import cv2
 from PIL import Image, ImageTk
 
 from application.gear_analysis import (
+    DefectAnalysis,
+    analyze_defects,
     classify_gear_type,
     detect_corrosion,
     diameter_px_to_mm,
@@ -73,6 +75,7 @@ class TkinterApp:
         self._last_diameter_px: Optional[float] = None
         self._last_diameter_mm: Optional[float] = None
         self._last_corrosion_label = "N/D"
+        self._last_defect_analysis: Optional[DefectAnalysis] = None
         self._quality_override: Optional[str] = None  # None = calidad automática
         self._photo_image = None  # referencia viva, evita que el GC borre la imagen
         self._lote_placeholder = "Ej. LOTE-014"
@@ -284,6 +287,17 @@ class TkinterApp:
             relief="flat", padx=10, pady=8, cursor="hand2", bd=0)
         self._reject_btn.grid(row=0, column=1, sticky="ew", padx=(4, 0))
         self._refresh_quality_buttons()
+
+        # Motivo(s) de por qué la calidad automática marcó la pieza como
+        # Defectuoso (vacío si está Aprobado o no hay lectura todavía).
+        # height fijo (en líneas) para reservar SIEMPRE el mismo espacio, sin
+        # importar si hay 0, 1 o varias razones -> evita que el panel se
+        # "encoja/estire" (el mismo temblor de tamaño que se corrigió antes).
+        self._defect_reason_var = tk.StringVar(value="")
+        self._defect_reason_label = tk.Label(
+            panel, textvariable=self._defect_reason_var, bg=BG_PANEL, fg=ACCENT_RED,
+            font=("TkDefaultFont", 9), wraplength=280, justify="left", anchor="nw", height=4)
+        self._defect_reason_label.pack(fill="x", padx=16, pady=(0, 8))
 
         ttk.Label(panel, text="IDENTIFICADOR / LOTE (OPCIONAL)", style="FieldLabel.TLabel").pack(
             anchor="w", padx=16)
@@ -540,7 +554,8 @@ class TkinterApp:
         result = self._last_result
         if result is None or not result.success:
             return None
-        return "Defectuoso" if result.warning else "Aprobado"
+        analysis = self._last_defect_analysis
+        return "Defectuoso" if (analysis is not None and analysis.is_defective) else "Aprobado"
 
     def _current_quality(self) -> Optional[str]:
         return self._quality_override or self._auto_quality()
@@ -674,6 +689,8 @@ class TkinterApp:
             self._last_diameter_px = None
             self._last_diameter_mm = None
             self._last_corrosion_label = "N/D"
+            self._last_defect_analysis = None
+            self._defect_reason_var.set("")
             return
 
         self._count_var.set(str(result.tooth_count))
@@ -688,10 +705,23 @@ class TkinterApp:
         self._last_diameter_mm = diameter_mm
         self._diameter_var.set(f"{diameter_mm:.1f}" if diameter_mm is not None else "sin calibrar")
 
-        corrosion = detect_corrosion(frame, result.contour)
+        corrosion = detect_corrosion(frame, result.contour, self.config.rust_ratio_threshold)
         corrosion_label = "Sí" if corrosion.has_corrosion else "No"
         self._last_corrosion_label = corrosion_label
         self._corrosion_var.set(corrosion_label)
+
+        # Decisión automática de Defectuoso/Aprobado con motivo(s) explícitos
+        # (conteo fuera de rango, corrosión y/o diente roto/faltante). El
+        # usuario sigue pudiendo sobrescribirla con los botones de calidad.
+        defect_analysis = analyze_defects(result, corrosion, self.config)
+        self._last_defect_analysis = defect_analysis
+        if defect_analysis.is_defective:
+            self._defect_reason_var.set(
+                "Motivo(s) de rechazo automático:\n"
+                + "\n".join(f"• {reason}" for reason in defect_analysis.reasons)
+            )
+        else:
+            self._defect_reason_var.set("")
 
     def _draw_result(self, frame, result: ToothDetectionResult):
         output = frame.copy()

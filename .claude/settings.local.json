@@ -18,7 +18,10 @@
       "Bash(python _gear_check.py)",
       "Bash(venv/Scripts/python.exe _gear_check.py)",
       "Bash(venv/Scripts/python.exe _gear_debug2.py)",
-      "Bash(venv/Scripts/python.exe -c ' *)"
+      "Bash(venv/Scripts/python.exe -c ' *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('presentation/tkinter_app.py', encoding='utf-8'\\).read\\(\\)\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('infrastructure/arduino_controller.py', encoding='utf-8'\\).read\\(\\)\\)\")",
+      "Bash(python -c \"import serial; print\\('pyserial OK', serial.__version__\\)\")"
     ]
   }
 }

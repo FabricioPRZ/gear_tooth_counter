@@ -2,14 +2,24 @@
 Capa de PRESENTACIÓN.
 
 Interfaz gráfica con Tkinter para una estación de inspección de engranes:
-- Panel izquierdo: video en vivo de una cámara IP (p.ej. ESP32-CAM) con el
-  contorno del engrane y los dientes detectados dibujados encima, más un
-  control de intensidad de luz (otra ESP32, con PWM) para iluminar la pieza.
+- Panel izquierdo: video en vivo de la cámara del celular por WiFi
+  (DroidCam) con el contorno del engrane y los dientes detectados
+  dibujados encima, más el control de intensidad de luz y la conexión al
+  Arduino que maneja la banda transportadora, el sensor de distancia y el
+  servo clasificador (ver arduino_banda/arduino_banda.ino).
 - Panel derecho: la lectura actual (dientes, tipo de engrane, diámetro en
   mm, corrosión aparente y calidad Aprobado/Defectuoso — automática según
   el rango esperado de dientes, aunque el usuario puede sobrescribirla), un
   mini-calibrador píxeles->mm, y un botón para guardar el registro de la
   pieza inspeccionada en el reporte Excel.
+
+FLUJO CON LA BANDA (ver README.md, sección "Conectar el Arduino con la
+interfaz"): el Arduino detecta una pieza con su sensor, frena la banda y
+avisa por serie ("EVENT:DETECTADO"). Esta clase espera un instante a que
+la imagen se estabilice, clasifica la pieza con el mismo análisis
+automático que ya se muestra en pantalla, y le contesta al Arduino
+("RESULTADO:APROBADO"/"RESULTADO:DEFECTUOSO") para que mueva el servo
+hacia el contenedor correcto y reanude la banda solo.
 
 Esta capa solo dibuja, lee/escribe la config y guarda registros; el
 algoritmo de conteo vive en application/tooth_counter_service.py y el
@@ -34,9 +44,8 @@ from application.gear_analysis import (
 from application.image_processor import to_binary_mask
 from application.tooth_counter_service import ToothCounterService
 from domain.models import ToothCounterConfig, ToothDetectionResult
+from infrastructure.arduino_controller import ArduinoController, DEFAULT_ARDUINO_PORT
 from infrastructure.calibration_repository import CalibrationRepository
-from infrastructure.ip_camera_source import DEFAULT_STREAM_URL, IPCameraSource
-from infrastructure.light_controller import DEFAULT_LIGHT_HOST, LightController
 from infrastructure.record_repository import InspectionRecord, RecordRepository
 from infrastructure.droidcam_source import DEFAULT_PORT, DroidCamSource
 
@@ -51,10 +60,10 @@ ACCENT_BLUE_HOVER = "#1f6feb"
 ACCENT_GREEN = "#3fb950"
 ACCENT_RED = "#f85149"
 
-# Si la ESP32-CAM no entrega ni un frame en este tiempo desde que se intenta
-# conectar, se cambia sola a la cámara del celular por WiFi (DroidCam) como
-# respaldo.
-CAMERA_FALLBACK_TIMEOUT_S = 8.0
+# Tras el aviso "EVENT:DETECTADO" del Arduino (la banda ya se detuvo), se
+# espera este margen antes de leer el frame para clasificar: da tiempo a
+# que la imagen deje de moverse por la inercia de la banda/pieza.
+CLASSIFY_SETTLE_S = 0.6
 
 
 class TkinterApp:
@@ -65,11 +74,13 @@ class TkinterApp:
         self.calibration = CalibrationRepository()
         self.config.pixels_per_mm = self.calibration.load_pixels_per_mm()
 
-        self.camera = None  # IPCameraSource o DroidCamSource, misma interfaz
-        self.light = LightController(DEFAULT_LIGHT_HOST)
-        self._camera_source_kind = "esp32"  # "esp32" o "usb" (celular por WiFi)
-        self._camera_connect_started_at: Optional[float] = None
-        self._auto_fallback_done = False
+        self.camera: Optional[DroidCamSource] = None  # cámara del celular (DroidCam)
+        self.arduino = ArduinoController(DEFAULT_ARDUINO_PORT)
+        self._arduino_open = False
+        # True mientras se espera la clasificación tras un "EVENT:DETECTADO"
+        # del Arduino (banda detenida, pieza bajo la cámara).
+        self._awaiting_classification = False
+        self._classify_after = 0.0
         self._last_result: Optional[ToothDetectionResult] = None
         self._last_gear_type = "--"
         self._last_diameter_px: Optional[float] = None
@@ -185,7 +196,8 @@ class TkinterApp:
         self._status_label.pack(side="left")
 
     # ------------------------------------------------------------------
-    # Panel de cámara (izquierda): video + control de intensidad de luz
+    # Panel de cámara (izquierda): video del celular + control de luz y
+    # de la conexión con el Arduino (banda/sensor/servo)
     # ------------------------------------------------------------------
     def _build_camera_panel(self, parent: ttk.Frame) -> None:
         panel = tk.Frame(parent, bg=BG_PANEL, highlightbackground=BORDER, highlightthickness=1)
@@ -193,50 +205,33 @@ class TkinterApp:
 
         head = ttk.Frame(panel, style="TFrame")
         head.pack(fill="x", padx=14, pady=(12, 8))
-        ttk.Label(head, text="CÁMARA EN TIEMPO REAL", style="PanelTitle.TLabel").pack(side="left")
+        ttk.Label(head, text="CÁMARA EN TIEMPO REAL (CELULAR)", style="PanelTitle.TLabel").pack(side="left")
 
-        source_row = ttk.Frame(panel, style="TFrame")
-        source_row.pack(fill="x", padx=14, pady=(0, 6))
-        ttk.Label(source_row, text="Fuente:", style="PanelSub.TLabel").pack(side="left")
-        self._source_esp32_btn = tk.Button(
-            source_row, text="ESP32-CAM", command=lambda: self._select_camera_source("esp32"),
-            relief="flat", padx=10, pady=3, cursor="hand2", bd=0)
-        self._source_esp32_btn.pack(side="left", padx=(8, 4))
-        self._source_usb_btn = tk.Button(
-            source_row, text="Celular (WiFi)", command=lambda: self._select_camera_source("usb"),
-            relief="flat", padx=10, pady=3, cursor="hand2", bd=0)
-        self._source_usb_btn.pack(side="left")
-
-        conn = ttk.Frame(panel, style="TFrame")
-        conn.pack(fill="x", padx=14, pady=(0, 4))
-        ttk.Label(conn, text="Dirección de la cámara:", style="PanelSub.TLabel").pack(side="left")
-        self._address_var = tk.StringVar(value=DEFAULT_STREAM_URL)
-        address_entry = ttk.Entry(conn, textvariable=self._address_var, width=26)
-        address_entry.pack(side="left", padx=(8, 8))
-        address_entry.bind("<Return>", lambda _e: self._on_connect_clicked())
-        self._connect_btn = tk.Button(conn, text="Desconectar", command=self._on_connect_clicked,
+        usb_row = ttk.Frame(panel, style="TFrame")
+        usb_row.pack(fill="x", padx=14, pady=(0, 4))
+        ttk.Label(usb_row, text="IP celular:", style="PanelSub.TLabel").pack(side="left")
+        self._usb_ip_var = tk.StringVar(value="")
+        ip_entry = ttk.Entry(usb_row, textvariable=self._usb_ip_var, width=15)
+        ip_entry.pack(side="left", padx=(8, 12))
+        ip_entry.bind("<Return>", lambda _e: self._on_connect_clicked())
+        ttk.Label(usb_row, text="Puerto:", style="PanelSub.TLabel").pack(side="left")
+        self._usb_port_var = tk.StringVar(value=str(DEFAULT_PORT))
+        port_entry = ttk.Entry(usb_row, textvariable=self._usb_port_var, width=6)
+        port_entry.pack(side="left", padx=(8, 8))
+        port_entry.bind("<Return>", lambda _e: self._on_connect_clicked())
+        self._connect_btn = tk.Button(usb_row, text="Conectar", command=self._on_connect_clicked,
                                     bg=ACCENT_BLUE, fg="white", relief="flat",
                                     activebackground=ACCENT_BLUE_HOVER, activeforeground="white",
                                     padx=12, pady=2, cursor="hand2", bd=0)
         self._connect_btn.pack(side="left")
 
-        usb_row = ttk.Frame(panel, style="TFrame")
-        usb_row.pack(fill="x", padx=14, pady=(0, 8))
-        ttk.Label(usb_row, text="IP celular:", style="PanelSub.TLabel").pack(side="left")
-        self._usb_ip_var = tk.StringVar(value="")
-        ttk.Entry(usb_row, textvariable=self._usb_ip_var, width=15).pack(side="left", padx=(8, 12))
-        ttk.Label(usb_row, text="Puerto:", style="PanelSub.TLabel").pack(side="left")
-        self._usb_port_var = tk.StringVar(value=str(DEFAULT_PORT))
-        ttk.Entry(usb_row, textvariable=self._usb_port_var, width=6).pack(side="left", padx=(8, 0))
-        ttk.Label(usb_row, text="(abre DroidCam en el celular, elige conexión WiFi y copia esa IP/puerto)",
-                style="PanelSub.TLabel").pack(side="left", padx=(8, 0))
+        ttk.Label(panel, text="(abre DroidCam en el celular, elige conexión WiFi y copia esa IP/puerto)",
+                  style="PanelSub.TLabel").pack(anchor="w", padx=14, pady=(0, 8))
 
-        self._refresh_source_buttons()
-
-        # --- IMPORTANTE: el control de luz se empaca ANTES que el video,
-        # anclado a "bottom", para que siempre reserve su espacio sin
+        # --- IMPORTANTE: el control de luz/Arduino se empaca ANTES que el
+        # video, anclado a "bottom", para que siempre reserve su espacio sin
         # importar qué tan grande sea la imagen de la cámara.
-        self._build_light_control(panel)
+        self._build_arduino_control(panel)
 
         video_wrap = tk.Frame(panel, bg="black")
         video_wrap.pack(fill="both", expand=True, padx=14, pady=(0, 10))
@@ -247,25 +242,38 @@ class TkinterApp:
 
         self._video_label = tk.Label(
             video_wrap, bg="black",
-            text=f"Conectando con {DEFAULT_STREAM_URL}...",
+            text="Conectando con la cámara del celular (DroidCam)...",
             fg=TEXT_SECONDARY, font=("TkDefaultFont", 11), justify="center",
         )
         self._video_label.pack(fill="both", expand=True)
 
-    def _build_light_control(self, parent: tk.Frame) -> None:
-        light_box = tk.Frame(parent, bg=BG_PANEL)
-        light_box.pack(side="bottom", fill="x", padx=14, pady=(0, 12))
+    def _build_arduino_control(self, parent: tk.Frame) -> None:
+        """Conexión por puerto serie con el Arduino (banda/sensor/servo) y
+        el slider de intensidad de luz, que ahora también se manda al
+        Arduino por serie (ver infrastructure/arduino_controller.py)."""
+        box = tk.Frame(parent, bg=BG_PANEL)
+        box.pack(side="bottom", fill="x", padx=14, pady=(0, 12))
 
-        addr_row = ttk.Frame(light_box, style="TFrame")
-        addr_row.pack(fill="x", pady=(0, 4))
-        ttk.Label(addr_row, text="Luz (ESP32):", style="PanelSub.TLabel").pack(side="left")
-        self._light_address_var = tk.StringVar(value=DEFAULT_LIGHT_HOST)
-        light_entry = ttk.Entry(addr_row, textvariable=self._light_address_var, width=18)
-        light_entry.pack(side="left", padx=(8, 0))
-        light_entry.bind("<Return>", lambda _e: self._on_light_address_changed())
-        light_entry.bind("<FocusOut>", lambda _e: self._on_light_address_changed())
+        conn_row = ttk.Frame(box, style="TFrame")
+        conn_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(conn_row, text="Arduino (puerto COM):", style="PanelSub.TLabel").pack(side="left")
+        self._arduino_port_var = tk.StringVar(value=DEFAULT_ARDUINO_PORT)
+        arduino_entry = ttk.Entry(conn_row, textvariable=self._arduino_port_var, width=10)
+        arduino_entry.pack(side="left", padx=(8, 8))
+        arduino_entry.bind("<Return>", lambda _e: self._on_arduino_connect_clicked())
+        self._arduino_connect_btn = tk.Button(
+            conn_row, text="Conectar", command=self._on_arduino_connect_clicked,
+            bg=ACCENT_BLUE, fg="white", relief="flat",
+            activebackground=ACCENT_BLUE_HOVER, activeforeground="white",
+            padx=10, pady=2, cursor="hand2", bd=0)
+        self._arduino_connect_btn.pack(side="left")
+        self._arduino_status_dot = tk.Canvas(conn_row, width=10, height=10, bg=BG_PANEL,
+                                              highlightthickness=0)
+        self._arduino_status_dot.pack(side="left", padx=(10, 0))
+        self._arduino_status_dot_id = self._arduino_status_dot.create_oval(
+            1, 1, 9, 9, fill=ACCENT_RED, outline="")
 
-        slider_row = ttk.Frame(light_box, style="TFrame")
+        slider_row = ttk.Frame(box, style="TFrame")
         slider_row.pack(fill="x")
         ttk.Label(slider_row, text="Intensidad de luz:", style="PanelSub.TLabel").pack(side="left")
         self._light_value_var = tk.StringVar(value="255")
@@ -520,27 +528,15 @@ class TkinterApp:
     # ------------------------------------------------------------------
     # Conexión de cámara. open() nunca bloquea: lanza un hilo de fondo
     # que conecta y, si la señal se cae, reintenta solo cada pocos
-    # segundos. Hay dos fuentes intercambiables (misma interfaz
-    # open/read/is_connected/last_error/release): la ESP32-CAM por WiFi
-    # y el celular corriendo DroidCam también por WiFi (sin cable, sin
-    # cliente de escritorio: solo IP y puerto) — si la ESP32-CAM no da
-    # imagen a tiempo, se cambia sola al celular (ver _tick). También se
-    # puede forzar con los botones "Fuente".
+    # segundos. Única fuente: el celular corriendo DroidCam por WiFi
+    # (sin cable, sin cliente de escritorio: solo IP y puerto). La
+    # ESP32-CAM ya no se usa (ver README.md).
     # ------------------------------------------------------------------
     def _auto_connect(self) -> None:
-        self._camera_source_kind = "esp32"
-        self._camera_connect_started_at = time.time()
-        self._auto_fallback_done = False
-        self._connect_to(self._address_var.get())
+        self._connect_camera()
+        self._on_arduino_connect_clicked()
 
-    def _connect_to(self, address: str) -> None:
-        url = IPCameraSource.build_stream_url(address)
-        camera = IPCameraSource(url)
-        camera.open()
-        self.camera = camera
-        self._connect_btn.config(text="Desconectar")
-
-    def _connect_usb(self) -> None:
+    def _connect_camera(self) -> None:
         ip = self._usb_ip_var.get().strip()
         try:
             port = int(self._usb_port_var.get().strip())
@@ -551,31 +547,6 @@ class TkinterApp:
         self.camera = camera
         self._connect_btn.config(text="Desconectar")
 
-    def _select_camera_source(self, kind: str) -> None:
-        if self.camera is not None:
-            self.camera.release()
-            self.camera = None
-        self._camera_source_kind = kind
-        self._camera_connect_started_at = time.time()
-        self._auto_fallback_done = (kind == "usb")
-        self._refresh_source_buttons()
-        self._video_label.config(image="", text="Conectando...")
-        if kind == "esp32":
-            self._connect_to(self._address_var.get())
-        else:
-            self._connect_usb()
-
-    def _refresh_source_buttons(self) -> None:
-        esp32_active = self._camera_source_kind == "esp32"
-        self._source_esp32_btn.config(
-            bg=ACCENT_BLUE if esp32_active else BG_INPUT,
-            fg="white" if esp32_active else TEXT_SECONDARY,
-        )
-        self._source_usb_btn.config(
-            bg=ACCENT_BLUE if not esp32_active else BG_INPUT,
-            fg="white" if not esp32_active else TEXT_SECONDARY,
-        )
-
     def _on_connect_clicked(self) -> None:
         if self.camera is not None:
             self.camera.release()
@@ -585,13 +556,7 @@ class TkinterApp:
             self._video_label.config(
                 image="", text="Desconectado.\nPulsa 'Conectar' para reintentar.")
             return
-
-        self._camera_connect_started_at = time.time()
-        if self._camera_source_kind == "esp32":
-            self._auto_fallback_done = False
-            self._connect_to(self._address_var.get())
-        else:
-            self._connect_usb()
+        self._connect_camera()
 
     def _set_connection_status(self, connected: bool) -> None:
         color = ACCENT_GREEN if connected else ACCENT_RED
@@ -600,16 +565,31 @@ class TkinterApp:
         self._status_label.config(text=text)
 
     # ------------------------------------------------------------------
-    # Control de luz (ESP32 aparte, vía HTTP). El envío es no bloqueante:
-    # LightController lo maneja en su propio hilo de fondo.
+    # Conexión con el Arduino (banda/sensor/servo) por puerto serie, y
+    # control de luz (ahora se manda por el mismo puerto serie en vez de
+    # HTTP a una ESP32 aparte). Ambos envíos son no bloqueantes:
+    # ArduinoController los maneja en su propio hilo de fondo.
     # ------------------------------------------------------------------
-    def _on_light_address_changed(self) -> None:
-        self.light.set_host(self._light_address_var.get())
+    def _on_arduino_connect_clicked(self) -> None:
+        if self._arduino_open:
+            self.arduino.release()
+            self._arduino_open = False
+            self._arduino_connect_btn.config(text="Conectar")
+            self._set_arduino_status(False)
+            return
+        self.arduino.set_port(self._arduino_port_var.get())
+        self.arduino.open()
+        self._arduino_open = True
+        self._arduino_connect_btn.config(text="Desconectar")
+
+    def _set_arduino_status(self, connected: bool) -> None:
+        color = ACCENT_GREEN if connected else ACCENT_RED
+        self._arduino_status_dot.itemconfig(self._arduino_status_dot_id, fill=color)
 
     def _on_light_slider_moved(self, value: str) -> None:
         brightness = int(float(value))
         self._light_value_var.set(str(brightness))
-        self.light.set_brightness(brightness)
+        self.arduino.send_light(brightness)
 
     # ------------------------------------------------------------------
     # Calidad: automática según el rango esperado de dientes, con opción
@@ -705,6 +685,8 @@ class TkinterApp:
     # Bucle de video (se reprograma con root.after, sin bloquear la GUI)
     # ------------------------------------------------------------------
     def _tick(self) -> None:
+        self._poll_arduino()
+
         if self.camera is not None:
             connected = self.camera.is_connected()
             self._set_connection_status(connected)
@@ -725,6 +707,7 @@ class TkinterApp:
 
                 self._show_frame(output)
                 self._refresh_quality_buttons()
+                self._maybe_classify_for_arduino(result)
             elif not connected:
                 # Todavía no llega ningún frame (primera conexión o se cayó
                 # la señal): el hilo de fondo sigue reintentando solo, así
@@ -733,20 +716,51 @@ class TkinterApp:
                 self._video_label.config(
                     image="", text=error or "Buscando señal de la cámara...")
 
-                if (
-                    self._camera_source_kind == "esp32"
-                    and not self._auto_fallback_done
-                    and self._camera_connect_started_at is not None
-                    and time.time() - self._camera_connect_started_at > CAMERA_FALLBACK_TIMEOUT_S
-                ):
-                    self._auto_fallback_done = True
-                    self._feedback_var.set(
-                        "No se detectó la ESP32-CAM a tiempo; cambiando automáticamente "
-                        "a la cámara del celular por WiFi."
-                    )
-                    self._select_camera_source("usb")
-
+        self._set_arduino_status(self.arduino.is_connected())
         self.root.after(30, self._tick)
+
+    # ------------------------------------------------------------------
+    # Flujo banda/sensor/servo: el Arduino avisa por serie cuando detecta
+    # una pieza (ya frenó la banda), esta clase clasifica con el mismo
+    # análisis automático que se ve en pantalla, y le contesta al Arduino
+    # para que mueva el servo y reanude la banda. Si nunca hay una lectura
+    # válida, el propio Arduino tiene un timeout de seguridad que reanuda
+    # la banda solo (ver SAFETY_TIMEOUT_MS en arduino_banda.ino).
+    # ------------------------------------------------------------------
+    def _poll_arduino(self) -> None:
+        for event in self.arduino.poll_events():
+            self._handle_arduino_event(event)
+
+    def _handle_arduino_event(self, event: str) -> None:
+        if event == "READY":
+            self._feedback_var.set("Arduino conectado: banda, sensor y luz listos.")
+        elif event == "EVENT:DETECTADO":
+            self._awaiting_classification = True
+            self._classify_after = time.time() + CLASSIFY_SETTLE_S
+            self._feedback_var.set("Pieza detectada: banda detenida, clasificando...")
+        elif event == "EVENT:TIMEOUT":
+            self._awaiting_classification = False
+            self._feedback_var.set(
+                "No se pudo clasificar a tiempo; la banda se reanudó sola "
+                "(revisa que la cámara vea bien la pieza)."
+            )
+        elif event.startswith("ERROR:"):
+            self._feedback_var.set(f"Arduino reportó un error: {event}")
+
+    def _maybe_classify_for_arduino(self, result: ToothDetectionResult) -> None:
+        if not self._awaiting_classification:
+            return
+        if time.time() < self._classify_after:
+            return  # deja que la imagen se estabilice tras frenar la banda
+        if not result.success:
+            return  # todavía no hay una lectura válida; el Arduino tiene su
+                     # propio timeout de seguridad si esto nunca ocurre
+        quality = self._auto_quality() or "Defectuoso"
+        self.arduino.send_result(quality)
+        self._awaiting_classification = False
+        self._feedback_var.set(
+            f"Pieza clasificada como {quality}: banda reanudada, servo dirigiendo."
+        )
 
     def _update_reading(self, frame, result: ToothDetectionResult) -> None:
         if not result.success:
@@ -849,5 +863,5 @@ class TkinterApp:
     def _on_close(self) -> None:
         if self.camera is not None:
             self.camera.release()
-        self.light.stop()
+        self.arduino.release()
         self.root.destroy()

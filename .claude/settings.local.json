@@ -17,7 +17,8 @@
       "Bash(./venv/Scripts/python.exe _gear_debug2.py)",
       "Bash(python _gear_check.py)",
       "Bash(venv/Scripts/python.exe _gear_check.py)",
-      "Bash(venv/Scripts/python.exe _gear_debug2.py)"
+      "Bash(venv/Scripts/python.exe _gear_debug2.py)",
+      "Bash(venv/Scripts/python.exe -c ' *)"
     ]
   }
 }

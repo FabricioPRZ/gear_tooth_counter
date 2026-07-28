@@ -83,13 +83,46 @@ class TkinterApp:
         self.root = tk.Tk()
         self.root.title("Conteo de Dientes de Engrane - Estación de Inspección")
         self.root.configure(bg=BG_APP)
-        self.root.geometry("1280x760")
-        self.root.minsize(1080, 680)
+        self._fit_window_to_screen()
 
         self._build_style()
         self._build_layout()
         self._auto_connect()
         self._tick()
+
+    # ------------------------------------------------------------------
+    # Tamaño de ventana adaptado a la pantalla actual.
+    #
+    # Antes la ventana abría con un tamaño fijo en píxeles (1280x760). En un
+    # monitor con menor resolución (o con escalado de Windows distinto) ese
+    # tamaño podía ser más grande que el área de trabajo real, dejando
+    # partes de la interfaz (como la calibración) fuera de la pantalla y sin
+    # forma de llegar a ellas. Ahora la ventana se abre MAXIMIZADA al área de
+    # trabajo real del monitor (se adapta sola a cualquier resolución), y el
+    # panel de lectura (derecha) es además desplazable con scroll: así, si
+    # aun maximizada la pantalla es demasiado chica para mostrar todo de una
+    # vez, el contenido sigue siendo alcanzable con la rueda del mouse o la
+    # barra de scroll en vez de quedar cortado.
+    # ------------------------------------------------------------------
+    def _fit_window_to_screen(self) -> None:
+        self.root.update_idletasks()
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+
+        # minsize nunca debe superar la pantalla real, o Windows no dejaría
+        # ni siquiera abrir/mover la ventana con comodidad en monitores chicos.
+        self.root.minsize(min(1080, screen_w - 40), min(680, screen_h - 80))
+
+        try:
+            # "zoomed" es el estado nativo de Windows equivalente a maximizar
+            # con el botón de la ventana: usa el área de trabajo real (sin
+            # tapar la barra de tareas) de la pantalla donde se abra, sea
+            # cual sea su resolución.
+            self.root.state("zoomed")
+        except tk.TclError:
+            # Fallback si "zoomed" no está disponible (p.ej. otro SO): usar
+            # el tamaño completo de pantalla informado, con margen.
+            self.root.geometry(f"{screen_w - 20}x{screen_h - 60}+10+10")
 
     # ------------------------------------------------------------------
     # Estilos
@@ -249,8 +282,44 @@ class TkinterApp:
     # Panel de lectura actual (derecha)
     # ------------------------------------------------------------------
     def _build_reading_panel(self, parent: ttk.Frame) -> None:
-        panel = tk.Frame(parent, bg=BG_PANEL, highlightbackground=BORDER, highlightthickness=1)
-        panel.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        outer = tk.Frame(parent, bg=BG_PANEL, highlightbackground=BORDER, highlightthickness=1)
+        outer.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        outer.rowconfigure(0, weight=1)
+        outer.columnconfigure(0, weight=1)
+
+        # Todo el contenido de este panel (lectura, calibración, calidad,
+        # calibración de detección) va DENTRO de un Canvas con scroll
+        # vertical. En pantallas de menor resolución (o con más zoom del
+        # sistema) puede que no quepa todo de una sola vez: con esto sigue
+        # siendo accesible con la rueda del mouse o la barra, en vez de
+        # quedar cortado fuera de la ventana.
+        canvas = tk.Canvas(outer, bg=BG_PANEL, highlightthickness=0, bd=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        panel = tk.Frame(canvas, bg=BG_PANEL)
+        panel_window = canvas.create_window((0, 0), window=panel, anchor="nw")
+
+        def _sync_scrollregion(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _sync_panel_width(event) -> None:
+            # El panel interno siempre ocupa el ancho visible del canvas
+            # (solo se desplaza en vertical, no en horizontal).
+            canvas.itemconfigure(panel_window, width=event.width)
+
+        panel.bind("<Configure>", _sync_scrollregion)
+        canvas.bind("<Configure>", _sync_panel_width)
+
+        def _on_mousewheel(event) -> None:
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        # Se liga a nivel de toda la ventana porque este es el único panel
+        # con scroll de la app: así funciona sin importar sobre qué widget
+        # hijo (botón, entry, slider) esté el cursor en ese momento.
+        self.root.bind_all("<MouseWheel>", _on_mousewheel)
 
         head = ttk.Frame(panel, style="TFrame")
         head.pack(fill="x", padx=16, pady=(14, 10))
